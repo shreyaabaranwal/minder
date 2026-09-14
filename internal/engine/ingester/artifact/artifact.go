@@ -192,6 +192,11 @@ func (i *Ingest) getVerificationResult(
 
 	registry := getRegistryForProvider(i.prov)
 	repository := buildRepository(artifact)
+	// Raw-manifest support is scoped to providers implementing the OCI
+	// interface (DockerHub, Quay) for now. GitHub/GHCR doesn't implement
+	// this interface today; that's a known, documented gap pending a
+	// decision on whether/how to extend GHCR.
+	ocicli, ociErr := interfaces.As[provifv1.OCI](i.prov)
 
 	// Loop through all artifact versions that apply to this rule and get the provenance info for each
 	for _, version := range versions {
@@ -200,6 +205,19 @@ func (i *Ingest) getVerificationResult(
 			Repository: repository,
 			Tags:       version.Tags,
 			Digest:     version.Sha,
+		}
+
+		var rawManifest *provifv1.RawManifest
+		if ociErr == nil {
+			rawManifest, err = ocicli.GetRawManifest(ctx, artifact.GetName(), version.GetSha())
+			if err != nil {
+				// Deliberately non-fatal: a transient manifest-fetch
+				// failure shouldn't block sigstore verification results,
+				// which is this ingester's primary purpose.
+				zerolog.Ctx(ctx).Debug().Err(err).Str("name", artifact.GetName()).
+					Msg("failed to fetch raw manifest, continuing without it")
+				rawManifest = nil
+			}
 		}
 
 		// Try getting provenance info for the artifact version
@@ -245,27 +263,27 @@ func (i *Ingest) getVerificationResult(
 					Predicate:     res.Statement.Predicate,
 				}
 			}
-			// Append the identity and verification result to the list
-			results = append(results, map[string]any{
+			// Append the identity, verification result, and (when
+			// available) raw manifest to the list
+			entry := map[string]any{
 				"Identity":     identity,
 				"Verification": *verResult,
-			})
+			}
+			if rawManifest != nil {
+				entry["Manifest"] = *rawManifest
+			}
+			results = append(results, entry)
 		}
 	}
 	return results, nil
 }
 
-// ghcrRegistry is the registry GitHub-backed artifacts are resolved against.
-// This mirrors the default used by the sigstore verifier itself: newContainerAuth
-// in internal/verifier/sigstore/container/container.go defaults to "ghcr.io"
-// unless a provider overrides it via WithRegistry (the OCI-provider case below).
-const ghcrRegistry = "ghcr.io"
-
 // getRegistryForProvider returns the registry hostname for the artifact's
-// provider. Providers that expose one generically via the OCI interface
-// (e.g. DockerHub) report their own; GitHub is handled as a special case
-// since it authenticates against GHCR without implementing the OCI
-// interface. Any other provider type leaves this empty rather than guess.
+// provider. OCI-interface providers (DockerHub, Quay) report their own
+// registry. GitHub returns ghcrRegistry, consistent with the sigstore
+// verifier's existing assumption (see newContainerAuth in
+// internal/verifier/sigstore/container/container.go). Any other provider
+// type returns "" -- genuinely unknown, not silently swallowed.
 func getRegistryForProvider(prov interfaces.Provider) string {
 	if ocicli, err := interfaces.As[provifv1.OCI](prov); err == nil {
 		return ocicli.GetRegistry()
@@ -275,6 +293,13 @@ func getRegistryForProvider(prov interfaces.Provider) string {
 	}
 	return ""
 }
+
+// ghcrRegistry mirrors the default the sigstore verifier already assumes
+// for GitHub-backed artifacts (see newContainerAuth in
+// internal/verifier/sigstore/container/container.go, which defaults to
+// "ghcr.io" when the GitHub path never calls WithRegistry). GitHub-hosted
+// container artifacts are treated as ghcr.io today throughout minder.
+const ghcrRegistry = "ghcr.io"
 
 // buildRepository returns the artifact's path within its registry.
 //

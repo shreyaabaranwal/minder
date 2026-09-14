@@ -157,6 +157,28 @@ func (o *OCI) GetManifest(ctx context.Context, contname, tag string) (*v1.Manife
 	return man, nil
 }
 
+// GetRawManifest returns the manifest or image index exactly as returned by
+// the registry, fetched by digest (not tag) since digests are canonical and
+// always available on an artifact version, unlike tags. Unlike GetManifest,
+// this does not resolve a multi-platform index down to a single platform.
+func (o *OCI) GetRawManifest(ctx context.Context, contname, digest string) (*provifv1.RawManifest, error) {
+	ref, err := name.NewDigest(fmt.Sprintf("%s/%s@%s", o.baseURL, contname, digest))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse digest reference: %w", err)
+	}
+
+	desc, err := remote.Get(ref, remote.WithContext(ctx), remote.WithUserAgent(constants.ServerUserAgent))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get manifest: %w", err)
+	}
+
+	return &provifv1.RawManifest{
+		MediaType: string(desc.MediaType),
+		Digest:    desc.Digest.String(),
+		Content:   desc.Manifest,
+	}, nil
+}
+
 // GetRegistry returns the registry name
 func (o *OCI) GetRegistry() string {
 	return o.registry
